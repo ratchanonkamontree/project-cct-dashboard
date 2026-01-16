@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Project CCT Dashboard V40 Optimized</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+<style>
+body{font-family:Sarabun;background:#f1f5f9}
+.card{background:#fff;border-radius:14px;padding:20px;box-shadow:0 4px 10px rgba(0,0,0,.05)}
+.loader{border:4px solid #eee;border-top:4px solid #2563eb;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite}
+@keyframes spin{100%{transform:rotate(360deg)}}
+.online-dot{width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block}
+</style>
+</head>
+<body>
+
+<div id="loading" class="fixed inset-0 bg-white flex flex-col items-center justify-center z-50">
+<div class="loader mb-4"></div>
+<div class="font-bold text-lg">Loading Project CCT Dashboard...</div>
+<div class="text-sm text-gray-400 mt-2" id="loading-text">Connecting...</div>
+</div>
+
+<div id="main-app" class="hidden">
+
+<nav class="bg-white border-b p-4 flex justify-between items-center sticky top-0">
+<div class="font-bold text-xl">⚡ Project CCT</div>
+<div class="flex items-center gap-3 text-sm">
+<div id="data-source-status">-</div>
+<div id="status-indicator" class="hidden text-green-600 flex items-center gap-1">
+<span class="online-dot"></span> Live
+</div>
+<button id="refresh-btn" class="px-3 py-1 border rounded">Refresh</button>
+</div>
+</nav>
+
+<div class="p-4 text-xs text-gray-400">Last update: <span id="last-updated">-</span></div>
+
+<div class="grid grid-cols-1 md:grid-cols-5 gap-4 p-4">
+<div class="card"><div>Total Jobs</div><div id="kpi-jobs" class="text-2xl font-bold">0</div></div>
+<div class="card"><div>Total PBOQ</div><div id="kpi-pboq" class="text-2xl font-bold">0</div></div>
+<div class="card"><div>Total FBOQ</div><div id="kpi-fboq" class="text-2xl font-bold">0</div></div>
+<div class="card"><div>Work Order</div><div id="kpi-wo" class="text-2xl font-bold">0</div></div>
+<div class="card"><div>PO</div><div id="kpi-po" class="text-2xl font-bold">0</div></div>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+<div class="card"><div id="chart-region" style="height:300px"></div></div>
+<div class="card"><div id="chart-project" style="height:300px"></div></div>
+<div class="card"><div id="chart-status" style="height:300px"></div></div>
+<div class="card"><div id="chart-pboq" style="height:300px"></div></div>
+</div>
+
+</div>
+
+<script>
+/******** CONFIG ********/
+const SHEET_URL="const SHEET_URL="https://docs.google.com/spreadsheets/d/e/2PACX-1vT_QKLW_J1dfnepcwsdExV1aBiX3gc7voJC1Pckm5-jkyG1AEjfHEdFz9x2CCOPVEolqIAWPun7721c/pub?output=csv";
+const REFRESH_RATE=15000;
+
+/******** STATE ********/
+let rawData=[],filteredData=[];
+let fetchController=null;
+let renderTimer=null;
+
+/******** INIT ********/
+window.onload=()=>{
+fetchData();
+setInterval(fetchData,REFRESH_RATE);
+document.getElementById("refresh-btn").onclick=fetchData;
+}
+
+/******** FETCH ********/
+async function fetchData(){
+if(fetchController) fetchController.abort();
+fetchController=new AbortController();
+
+try{
+document.getElementById("loading-text").innerText="Fetching data...";
+const res=await fetch(SHEET_URL+"&t="+Date.now(),{cache:"no-store",signal:fetchController.signal});
+const text=await res.text();
+
+Papa.parse(text,{
+skipEmptyLines:true,
+complete:r=>successHandler(r)
+});
+
+}catch(e){
+if(e.name!=="AbortError") errorHandler(e);
+}
+}
+
+/******** SUCCESS ********/
+function successHandler(results){
+if(!results.data?.length) return errorHandler("Empty data");
+
+if(!processData(results.data)) return alert("Invalid sheet structure");
+
+document.getElementById("loading").style.display="none";
+document.getElementById("main-app").classList.remove("hidden");
+
+document.getElementById("data-source-status").innerText="Google Sheet";
+document.getElementById("status-indicator").classList.remove("hidden");
+document.getElementById("last-updated").innerText=new Date().toLocaleString("th-TH");
+
+safeRender();
+}
+
+/******** ERROR ********/
+function errorHandler(e){
+console.error(e);
+document.getElementById("loading-text").innerText="Connection failed";
+}
+
+/******** DATA ********/
+function detectColumn(headers,keys){
+return headers.findIndex(h=>keys.some(k=>h.includes(k)));
+}
+
+function parseMoney(v){
+if(!v) return 0;
+return parseFloat(v.toString().replace(/[^\d.-]/g,""))||0;
+}
+
+function processData(rows){
+const headers=rows[1].map(h=>h.toLowerCase());
+const col={
+id:detectColumn(headers,["cct"]),
+project:detectColumn(headers,["project"]),
+region:detectColumn(headers,["region","sub"]),
+status:detectColumn(headers,["status"]),
+wo:detectColumn(headers,["wo","work"]),
+po:detectColumn(headers,["po"]),
+pboq:detectColumn(headers,["pboq"]),
+fboq:detectColumn(headers,["fboq"])
+};
+
+if(Object.values(col).some(v=>v===-1)) return false;
+
+rawData=rows.slice(2).map(r=>{
+const id=r[col.id];
+if(!id||!id.toString().startsWith("CCT")) return null;
+return{
+id,
+project:r[col.project]||"Unknown",
+region:r[col.region]||"Unknown",
+status:r[col.status]||"Unknown",
+wo:r[col.wo]||"",
+po:r[col.po]||"",
+pboq:parseMoney(r[col.pboq]),
+fboq:parseMoney(r[col.fboq])
+};
+}).filter(Boolean);
+
+filteredData=[...rawData];
+return true;
+}
+
+/******** RENDER ********/
+function safeRender(){
+clearTimeout(renderTimer);
+renderTimer=setTimeout(renderDashboard,100);
+}
+
+function updateKPI(id,val){
+document.getElementById(id).innerText=val.toLocaleString();
+}
+
+function renderDashboard(){
+const data=filteredData;
+
+const total=data.length;
+const pboq=data.reduce((s,d)=>s+d.pboq,0);
+const fboq=data.reduce((s,d)=>s+d.fboq,0);
+const hasWO=data.filter(d=>d.wo).length;
+const hasPO=data.filter(d=>d.wo&&d.po).length;
+
+updateKPI("kpi-jobs",total);
+updateKPI("kpi-pboq",pboq);
+updateKPI("kpi-fboq",fboq);
+updateKPI("kpi-wo",hasWO);
+updateKPI("kpi-po",hasPO);
+
+renderCharts(data);
+}
+
+function countBy(data,key){
+const o={};
+data.forEach(d=>o[d[key]]=(o[d[key]]||0)+1);
+return o;
+}
+
+function renderCharts(data){
+const layout={margin:{t:30},paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)"};
+const config={displayModeBar:false,responsive:true};
+
+const r=countBy(data,"region");
+Plotly.react("chart-region",[{
+x:Object.keys(r),y:Object.values(r),type:"bar"
+}],layout,config);
+
+const p=countBy(data,"project");
+Plotly.react("chart-project",[{
+y:Object.keys(p),x:Object.values(p),type:"bar",orientation:"h"
+}],layout,config);
+
+/* status optimized */
+const map={};
+data.forEach(d=>{
+map[d.status]??={};
+map[d.status][d.project]=(map[d.status][d.project]||0)+1;
+});
+
+const traces=Object.keys(map).map(s=>({
+name:s,type:"bar",
+x:Object.keys(p),
+y:Object.keys(p).map(pr=>map[s][pr]||0)
+}));
+
+Plotly.react("chart-status",traces,{...layout,barmode:"stack"},config);
+
+/* pboq pie */
+const pb={};
+data.forEach(d=>pb[d.project]=(pb[d.project]||0)+d.pboq);
+
+Plotly.react("chart-pboq",[{
+labels:Object.keys(pb),
+values:Object.values(pb),
+type:"pie",hole:.5
+}],layout,config);
+}
+
+window.onresize=safeRender;
+</script>
+</body>
+</html>
